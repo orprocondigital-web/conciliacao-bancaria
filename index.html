@@ -250,6 +250,34 @@
     </div>
   </div>
 
+  <!-- ====================== MODAL FORÇAR CONCILIAÇÃO ====================== -->
+  <div id="modal-forcar" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Forçar Conciliação Manual</h3>
+        <button id="btn-fechar-modal-forcar" class="btn-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="forcar-label">Item selecionado</div>
+        <div class="forcar-item-selecionado">
+          <div class="forcar-resumo" id="forcar-item-resumo"></div>
+        </div>
+
+        <div class="form-group" style="margin-top:1rem;">
+          <label for="forcar-select">Vincular com</label>
+          <select id="forcar-select" class="input" size="6"></select>
+        </div>
+
+        <p class="forcar-dica">Mostrando os itens pendentes do outro lado (extrato ↔ fornecedor), ordenados pela proximidade de valor com o item selecionado.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancelar-forcar" class="btn btn-outline">Cancelar</button>
+        <button id="btn-confirmar-forcar" class="btn btn-primary" disabled>Confirmar Match</button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

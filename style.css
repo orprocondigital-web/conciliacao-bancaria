@@ -546,6 +546,44 @@ body {
   border-top: 1px solid var(--gray-200);
 }
 
+/* ===================== MODAL FORÇAR MATCH ===================== */
+.forcar-item-selecionado {
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+}
+
+.forcar-label {
+  font-size: 0.8rem;
+  color: var(--gray-500);
+  margin-bottom: 0.35rem;
+  font-weight: 500;
+}
+
+.forcar-resumo {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--gray-900);
+  line-height: 1.4;
+}
+
+.forcar-dica {
+  font-size: 0.8rem;
+  color: var(--gray-500);
+  margin-top: 0.6rem;
+}
+
+#forcar-select option {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--gray-100);
+}
+
+#forcar-select option:checked {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
 /* ===================== RESPONSIVO ===================== */
 @media (max-width: 768px) {
   .header-content {

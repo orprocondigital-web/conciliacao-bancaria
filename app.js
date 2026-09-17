@@ -207,10 +207,7 @@ function normalizarExtrato(dados) {
       'lançamento', 'lancamento', 'histórico completo', 'complemento'
     ]);
     
-    const valor = parseValor(encontrarValor(linha, [
-      'valor', 'value', 'amount', 'vlr', 'valor (r$)', 'valor r$', 
-      'crédito', 'débito', 'credito', 'debito', 'entrada', 'saída'
-    ]));
+    const { valor, tipo } = detectarValorTipo(linha);
 
     return {
       id: `ext-${idx}`,
@@ -219,6 +216,7 @@ function normalizarExtrato(dados) {
       documento: String(documento || '').replace(/\D/g, ''),
       descricao: descricao || '',
       valor: valor,
+      tipo: tipo, // 'debito' | 'credito' | null
       usado: false,
       raw: linha
     };
@@ -299,7 +297,7 @@ function encontrarValor(obj, chaves) {
   return '';
 }
 
-function parseValor(str) {
+function parseValorComSinal(str) {
   if (str === null || str === undefined || str === '') return 0;
   let limpo = String(str)
     .replace(/R\$\s?/gi, '')
@@ -307,7 +305,37 @@ function parseValor(str) {
     .replace(/\./g, '')
     .replace(',', '.');
   const num = parseFloat(limpo);
-  return isNaN(num) ? 0 : Math.abs(num);
+  return isNaN(num) ? 0 : num;
+}
+
+function parseValor(str) {
+  return Math.abs(parseValorComSinal(str));
+}
+
+// Detecta se a linha do extrato é um débito (saída) ou crédito (entrada),
+// para não conciliar pagamentos a fornecedores com depósitos/entradas.
+function detectarValorTipo(linha) {
+  const keys = Object.keys(linha);
+  const norm = k => k.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  const chaveDebito = keys.find(k => /d[ée]bito|sa[íi]da/.test(norm(k)));
+  const chaveCredito = keys.find(k => /cr[ée]dito|entrada/.test(norm(k)));
+
+  // Colunas separadas de débito/crédito: usamos elas, é a informação mais confiável
+  if (chaveDebito !== undefined || chaveCredito !== undefined) {
+    const vDebito = chaveDebito !== undefined ? Math.abs(parseValorComSinal(linha[chaveDebito])) : 0;
+    const vCredito = chaveCredito !== undefined ? Math.abs(parseValorComSinal(linha[chaveCredito])) : 0;
+    if (vDebito > 0) return { valor: vDebito, tipo: 'debito' };
+    if (vCredito > 0) return { valor: vCredito, tipo: 'credito' };
+    return { valor: 0, tipo: null };
+  }
+
+  // Coluna única "valor": usa o sinal (quando existir) para inferir o tipo
+  const bruto = parseValorComSinal(encontrarValor(linha, [
+    'valor', 'value', 'amount', 'vlr', 'valor (r$)', 'valor r$'
+  ]));
+  if (bruto === 0) return { valor: 0, tipo: null };
+  return { valor: Math.abs(bruto), tipo: bruto < 0 ? 'debito' : 'credito' };
 }
 
 function formatarData(str) {
@@ -333,6 +361,18 @@ function formatarData(str) {
     }
   }
   return str;
+}
+
+// Escapa texto vindo dos arquivos do usuário antes de jogar no innerHTML,
+// evitando que um nome de fornecedor com <, >, & ou aspas quebre a tabela.
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
 function formatarMoeda(valor) {
@@ -377,29 +417,38 @@ function conciliar() {
       }
     }
 
-    // 2. Match por valor + nome
+    // 2. Match por valor + nome — agora GLOBAL: monta todos os pares candidatos
+    // válidos, ordena do melhor score para o pior e atribui nessa ordem. Isso evita
+    // que o primeiro fornecedor da planilha "roube" um match que serviria melhor
+    // para outro fornecedor mais abaixo, quando há valores repetidos.
+    const candidatos = [];
     for (const forn of estado.fornecedores) {
       if (forn.usado) continue;
-
-      let melhor = null;
-      let melhorScore = 0;
-
       for (const ext of estado.extrato) {
         if (ext.usado) continue;
         if (Math.abs(ext.valor - forn.valor) > 0.02) continue;
+        // Se soubermos o tipo da movimentação, só casa com saídas (pagamentos),
+        // nunca com entradas/créditos no extrato.
+        if (ext.tipo === 'credito') continue;
 
-        const score = similaridade(ext.descricao, forn.fornecedor);
-        if (score > melhorScore && score >= 0.35) {
-          melhorScore = score;
-          melhor = ext;
-        }
-      }
+        const scoreNome = similaridade(ext.descricao, forn.fornecedor);
+        if (scoreNome < 0.35) continue;
 
-      if (melhor) {
-        melhor.usado = true;
-        forn.usado = true;
-        conciliados.push(criarMatch(melhor, forn, 'valor+nome'));
+        const dias = diferencaDias(ext.data, forn.data);
+        // pequeno bônus de desempate quando as datas estão próximas
+        const score = scoreNome + (dias !== null ? Math.max(0, (5 - dias)) / 100 : 0);
+
+        candidatos.push({ forn, ext, score });
       }
+    }
+
+    candidatos.sort((a, b) => b.score - a.score);
+
+    for (const cand of candidatos) {
+      if (cand.forn.usado || cand.ext.usado) continue;
+      cand.ext.usado = true;
+      cand.forn.usado = true;
+      conciliados.push(criarMatch(cand.ext, cand.forn, 'valor+nome'));
     }
 
     // 3. Pendentes
@@ -424,6 +473,14 @@ function conciliar() {
     console.error('Erro na conciliação:', err);
     alert('Erro durante a conciliação. Veja o Console (F12).');
   }
+}
+
+function diferencaDias(dataA, dataB) {
+  if (!dataA || !dataB) return null;
+  const a = new Date(dataA);
+  const b = new Date(dataB);
+  if (isNaN(a) || isNaN(b)) return null;
+  return Math.abs((a - b) / (1000 * 60 * 60 * 24));
 }
 
 function criarMatch(ext, forn, tipo) {
@@ -503,8 +560,8 @@ function renderizarTabelas() {
     tbodyConc.innerHTML = estado.conciliados.map(item => `
       <tr>
         <td>${formatarDataBR(item.data)}</td>
-        <td>${item.documento || '-'}</td>
-        <td>${item.fornecedor || '-'}</td>
+        <td>${escapeHtml(item.documento) || '-'}</td>
+        <td>${escapeHtml(item.fornecedor) || '-'}</td>
         <td>${formatarMoeda(item.valor)}</td>
         <td><span class="badge badge-success">Conciliado</span></td>
         <td><button class="btn btn-outline btn-sm" onclick="abrirModalCorrecao('${item.id}')">Corrigir</button></td>
@@ -521,8 +578,8 @@ function renderizarTabelas() {
       <tr>
         <td><span class="badge ${item.tipo === 'extrato' ? 'badge-info' : 'badge-warning'}">${item.tipo === 'extrato' ? 'Extrato' : 'Fornecedor'}</span></td>
         <td>${formatarDataBR(item.data)}</td>
-        <td>${item.documento || '-'}</td>
-        <td>${item.fornecedor || item.descricao || '-'}</td>
+        <td>${escapeHtml(item.documento) || '-'}</td>
+        <td>${escapeHtml(item.fornecedor || item.descricao) || '-'}</td>
         <td>${formatarMoeda(item.valor)}</td>
         <td><button class="btn btn-outline btn-sm" onclick="forcarConciliacao('${item.id}')">Forçar</button></td>
       </tr>
@@ -538,7 +595,7 @@ function renderizarTabelas() {
       <tr>
         <td>${formatarDataBR(item.data)}</td>
         <td>${item.debito}</td>
-        <td>${item.participante || '-'}</td>
+        <td>${escapeHtml(item.participante) || '-'}</td>
         <td>${item.credito}</td>
         <td>${formatarMoeda(item.valor)}</td>
         <td><span class="badge ${item.origem === 'manual' ? 'badge-warning' : 'badge-info'}">${item.origem}</span></td>
@@ -577,7 +634,7 @@ function fecharModal() {
 
 $('#btn-fechar-modal').addEventListener('click', fecharModal);
 $('#btn-cancelar-modal').addEventListener('click', fecharModal);
-$('.modal-overlay').addEventListener('click', fecharModal);
+$('#modal-correcao .modal-overlay').addEventListener('click', fecharModal);
 
 $('#btn-salvar-correcao').addEventListener('click', () => {
   if (!estado.itemEditando) return;
@@ -602,11 +659,94 @@ $('#btn-salvar-correcao').addEventListener('click', () => {
   fecharModal();
 });
 
-function forcarConciliacao(id) {
-  alert('Em breve: funcionalidade de forçar match manual.');
+// -------------------- MODAL: FORÇAR CONCILIAÇÃO MANUAL --------------------
+let forcarItemOrigem = null;
+
+function resumoItemPendente(item) {
+  if (item.tipo === 'extrato') {
+    return `Extrato — ${formatarDataBR(item.data)} — ${item.descricao || 'sem descrição'} — ${formatarMoeda(item.valor)}`;
+  }
+  return `Fornecedor — ${formatarDataBR(item.data)} — ${item.fornecedor || 'sem nome'} — ${formatarMoeda(item.valor)}`;
 }
 
+function forcarConciliacao(id) {
+  const item = estado.pendentes.find(i => i.id === id);
+  if (!item) return;
+
+  const ehExtrato = item.tipo === 'extrato';
+  const listaOposta = estado.pendentes.filter(p => p.tipo === (ehExtrato ? 'fornecedor' : 'extrato'));
+
+  if (!listaOposta.length) {
+    alert(`Não há itens pendentes do lado ${ehExtrato ? 'de fornecedores' : 'do extrato'} para vincular.`);
+    return;
+  }
+
+  forcarItemOrigem = item;
+
+  // textContent evita qualquer risco de HTML vindo do arquivo do usuário
+  $('#forcar-item-resumo').textContent = resumoItemPendente(item);
+
+  const select = $('#forcar-select');
+  select.innerHTML = '';
+  listaOposta
+    .slice()
+    .sort((a, b) => Math.abs(a.valor - item.valor) - Math.abs(b.valor - item.valor))
+    .forEach(opp => {
+      const opt = document.createElement('option');
+      opt.value = opp.id;
+      opt.textContent = resumoItemPendente(opp);
+      select.appendChild(opt);
+    });
+
+  $('#btn-confirmar-forcar').disabled = true;
+  $('#modal-forcar').classList.remove('hidden');
+}
+
+function fecharModalForcar() {
+  $('#modal-forcar').classList.add('hidden');
+  $('#forcar-select').innerHTML = '';
+  $('#btn-confirmar-forcar').disabled = true;
+  forcarItemOrigem = null;
+}
+
+$('#forcar-select').addEventListener('change', () => {
+  $('#btn-confirmar-forcar').disabled = !$('#forcar-select').value;
+});
+
+$('#btn-fechar-modal-forcar').addEventListener('click', fecharModalForcar);
+$('#btn-cancelar-forcar').addEventListener('click', fecharModalForcar);
+$('#modal-forcar .modal-overlay').addEventListener('click', fecharModalForcar);
+
+$('#btn-confirmar-forcar').addEventListener('click', () => {
+  const outroId = $('#forcar-select').value;
+  if (!outroId || !forcarItemOrigem) return;
+
+  const outro = estado.pendentes.find(i => i.id === outroId);
+  if (!outro) return;
+
+  const ext = forcarItemOrigem.tipo === 'extrato' ? forcarItemOrigem : outro;
+  const forn = forcarItemOrigem.tipo === 'fornecedor' ? forcarItemOrigem : outro;
+
+  const match = criarMatch(ext, forn, 'manual');
+  estado.conciliados.push(match);
+  estado.lancamentos.push(...gerarLancamentos([match]));
+
+  const idsRemover = new Set([forcarItemOrigem.id, outro.id]);
+  estado.pendentes = estado.pendentes.filter(p => !idsRemover.has(p.id));
+
+  atualizarResumo();
+  renderizarTabelas();
+  fecharModalForcar();
+});
+
 // -------------------- HISTÓRICO + EXPORTAR --------------------
+function despojarRaw(item) {
+  // remove o campo "raw" (linha original do arquivo) antes de persistir,
+  // para não estourar o limite do localStorage
+  const { raw, ...resto } = item;
+  return resto;
+}
+
 $('#btn-salvar').addEventListener('click', () => {
   const registro = {
     id: Date.now(),
@@ -615,14 +755,22 @@ $('#btn-salvar').addEventListener('click', () => {
     pendentes: estado.pendentes.length,
     valorTotal: estado.conciliados.reduce((acc, i) => acc + i.valor, 0),
     dados: {
-      conciliados: estado.conciliados,
-      pendentes: estado.pendentes,
+      conciliados: estado.conciliados.map(despojarRaw),
+      pendentes: estado.pendentes.map(despojarRaw),
       lancamentos: estado.lancamentos
     }
   };
   estado.historico.unshift(registro);
-  localStorage.setItem('conciliacao_historico', JSON.stringify(estado.historico));
-  alert('Histórico salvo com sucesso!');
+  // mantém só os últimos 30 registros para não estourar o localStorage
+  estado.historico = estado.historico.slice(0, 30);
+
+  try {
+    localStorage.setItem('conciliacao_historico', JSON.stringify(estado.historico));
+    alert('Histórico salvo com sucesso!');
+  } catch (err) {
+    console.error('Erro ao salvar histórico:', err);
+    alert('Não foi possível salvar o histórico — o armazenamento local pode estar cheio. Tente excluir conciliações antigas.');
+  }
 });
 
 function renderizarHistorico() {
@@ -632,16 +780,25 @@ function renderizarHistorico() {
     return;
   }
   container.innerHTML = estado.historico.map(h => `
-    <div class="historico-item" onclick="carregarHistorico(${h.id})">
-      <div>
+    <div class="historico-item">
+      <div onclick="carregarHistorico(${h.id})" style="cursor:pointer;flex:1;">
         <strong>${h.data}</strong>
         <div style="font-size:0.85rem;color:#6b7280;margin-top:0.2rem;">
           ${h.conciliados} conciliados • ${h.pendentes} pendentes
         </div>
       </div>
-      <div style="font-weight:600;color:#2563eb;">${formatarMoeda(h.valorTotal)}</div>
+      <div style="font-weight:600;color:#2563eb;margin-right:1rem;">${formatarMoeda(h.valorTotal)}</div>
+      <button class="btn-remove" title="Excluir do histórico" onclick="excluirHistorico(event, ${h.id})">✕</button>
     </div>
   `).join('');
+}
+
+function excluirHistorico(event, id) {
+  event.stopPropagation();
+  if (!confirm('Excluir esta conciliação do histórico?')) return;
+  estado.historico = estado.historico.filter(h => h.id !== id);
+  localStorage.setItem('conciliacao_historico', JSON.stringify(estado.historico));
+  renderizarHistorico();
 }
 
 function carregarHistorico(id) {
@@ -671,12 +828,8 @@ $('#btn-exportar').addEventListener('click', () => {
   link.click();
 });
 
-// Estilo extra
-const styleExtra = document.createElement('style');
-styleExtra.textContent = `.btn-sm { padding: 0.3rem 0.7rem; font-size: 0.8rem; }`;
-document.head.appendChild(styleExtra);
-
 // Expor funções globais
 window.abrirModalCorrecao = abrirModalCorrecao;
 window.forcarConciliacao = forcarConciliacao;
 window.carregarHistorico = carregarHistorico;
+window.excluirHistorico = excluirHistorico;
