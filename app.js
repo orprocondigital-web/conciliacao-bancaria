@@ -124,6 +124,11 @@ function resetarUpload() {
 }
 
 // -------------------- LEITURA DE ARQUIVO (CSV + Excel) --------------------
+// Em vez de assumir "primeira linha = cabeçalho", lemos tudo como matriz bruta
+// (array de arrays) e deixamos matrizParaObjetos() descobrir onde o cabeçalho
+// de verdade está — necessário porque extratos bancários e relatórios contábeis
+// costumam ter linhas de preâmbulo (nome da empresa, período, título) antes da
+// tabela real, e relatórios paginados repetem o cabeçalho a cada página.
 function lerArquivo(file, callback) {
   const nome = file.name.toLowerCase();
   const isExcel = nome.endsWith('.xlsx') || nome.endsWith('.xls');
@@ -136,9 +141,9 @@ function lerArquivo(file, callback) {
         const workbook = XLSX.read(data, { type: 'array' });
         const primeiraAba = workbook.SheetNames[0];
         const planilha = workbook.Sheets[primeiraAba];
-        const json = XLSX.utils.sheet_to_json(planilha, { defval: '' });
-        console.log('Excel lido com sucesso. Linhas:', json.length);
-        callback(json);
+        const matriz = XLSX.utils.sheet_to_json(planilha, { header: 1, defval: '', raw: false });
+        console.log('Excel lido com sucesso. Linhas brutas:', matriz.length);
+        callback(matrizParaObjetos(matriz));
       } catch (err) {
         console.error('Erro ao ler Excel:', err);
         alert('Erro ao ler o arquivo Excel.');
@@ -152,8 +157,8 @@ function lerArquivo(file, callback) {
       try {
         let texto = e.target.result;
         if (texto.charCodeAt(0) === 0xFEFF) texto = texto.slice(1);
-        const linhas = parseCSV(texto);
-        callback(linhas);
+        const matriz = parseCSVBruto(texto);
+        callback(matrizParaObjetos(matriz));
       } catch (err) {
         console.error('Erro ao ler CSV:', err);
         alert('Não foi possível ler o arquivo CSV.');
@@ -164,25 +169,156 @@ function lerArquivo(file, callback) {
   }
 }
 
-function parseCSV(texto) {
+// Retorna uma matriz (array de arrays) a partir do texto do CSV, sem
+// assumir que a primeira linha é o cabeçalho — isso é decidido depois.
+function parseCSVBruto(texto) {
   const linhas = texto.trim().split(/\r?\n/);
-  if (linhas.length < 2) return [];
-
+  if (!linhas.length) return [];
   const primeira = linhas[0];
   const separador = (primeira.match(/;/g) || []).length >= (primeira.match(/,/g) || []).length ? ';' : ',';
+  return linhas.map(l => l.split(separador).map(v => v.trim().replace(/['"]/g, '')));
+}
 
-  const headers = primeira.split(separador).map(h => h.trim().toLowerCase().replace(/['"]/g, ''));
-  const dados = [];
+// -------------------- DETECÇÃO INTELIGENTE DE CABEÇALHO --------------------
+function normalizarTexto(v) {
+  return String(v ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+}
 
-  for (let i = 1; i < linhas.length; i++) {
-    const linha = linhas[i].trim();
-    if (!linha) continue;
-    const valores = linha.split(separador).map(v => v.trim().replace(/['"]/g, ''));
-    const obj = {};
-    headers.forEach((h, idx) => obj[h] = valores[idx] || '');
-    dados.push(obj);
+const PALAVRAS_CABECALHO = [
+  'data', 'date', 'documento', 'doc', 'numero', 'nro', 'descricao', 'historico', 'memo',
+  'fornecedor', 'razao social', 'participante', 'cliente', 'favorecido', 'beneficiario',
+  'valor', 'vlr', 'amount', 'debito', 'credito', 'saldo', 'conta', 'classificacao', 'nome da conta'
+];
+
+function pontuarLinhaComoCabecalho(linha) {
+  let pontos = 0;
+  linha.forEach(cel => {
+    const c = normalizarTexto(cel);
+    if (c && PALAVRAS_CABECALHO.some(p => c.includes(p))) pontos++;
+  });
+  return pontos;
+}
+
+// Procura, nas primeiras linhas do arquivo, aquela que mais parece um
+// cabeçalho de tabela — em vez de assumir que é sempre a linha 0. Isso
+// resolve extratos/relatórios que têm linhas de título/preâmbulo antes
+// da tabela de verdade.
+function encontrarLinhaCabecalho(matriz) {
+  let melhorIdx = 0;
+  let melhorPontos = 0;
+  const limite = Math.min(matriz.length, 40);
+  for (let i = 0; i < limite; i++) {
+    const pontos = pontuarLinhaComoCabecalho(matriz[i] || []);
+    if (pontos > melhorPontos) {
+      melhorPontos = pontos;
+      melhorIdx = i;
+    }
   }
-  return dados;
+  return melhorPontos >= 2 ? melhorIdx : 0;
+}
+
+// Relatórios contábeis exportados para impressão costumam repetir título,
+// nome da empresa e cabeçalho a cada "página". Essas linhas não são dados
+// e precisam ser descartadas.
+const PADROES_RUIDO = [
+  /balancete/i, /empresa:\s*\d/i, /inscri[cç][aã]o estadual/i, /p[aá]gina:?\s*\d/i,
+  /total de (cr[eé]ditos|d[eé]bitos)/i, /diferen[cç]a entre/i,
+  /resultado do per[ií]odo/i, /administrador/i, /^\s*cpf:/i, /saldo anterior$/i
+];
+
+function linhaEhRuido(linha, cabecalhoNormalizado) {
+  const textoLinha = linha.map(normalizarTexto).join(' ').trim();
+  if (!textoLinha) return true;
+  if (PADROES_RUIDO.some(re => re.test(textoLinha))) return true;
+  const normLinha = linha.map(normalizarTexto).join('|');
+  if (normLinha === cabecalhoNormalizado) return true; // cabeçalho repetido
+  return false;
+}
+
+// Em relatórios com células mescladas, o rótulo da coluna às vezes fica
+// numa posição e o dado de verdade aparece deslocado algumas colunas ao
+// lado em toda linha (ex.: rótulo "Nome da conta contábil" numa coluna,
+// mas o nome do fornecedor sempre aparecendo 2 colunas à frente). Aqui a
+// gente valida cada coluna do cabeçalho contra uma amostra de linhas de
+// dados e realoca quando a coluna "certa" está sistematicamente vazia.
+function corrigirMapeamentoColunas(headers, matriz, idxCabecalho) {
+  const amostra = matriz.slice(idxCabecalho + 1, Math.min(matriz.length, idxCabecalho + 21));
+  if (!amostra.length) return headers;
+
+  const taxaPreenchimento = (colIdx) => {
+    if (colIdx < 0) return 0;
+    let preenchidas = 0;
+    amostra.forEach(l => {
+      const v = l ? l[colIdx] : undefined;
+      if (v !== undefined && v !== null && String(v).trim() !== '') preenchidas++;
+    });
+    return preenchidas / amostra.length;
+  };
+
+  const usadas = new Set(headers.map((h, i) => (h ? i : -1)).filter(i => i >= 0));
+  const novosHeaders = headers.slice();
+
+  headers.forEach((h, idx) => {
+    if (!h || taxaPreenchimento(idx) >= 0.5) return; // já tem dado, não mexe
+
+    let melhorIdx = -1;
+    let melhorTaxa = 0.5;
+    for (let d = 1; d <= 4; d++) {
+      [idx + d, idx - d].forEach(cand => {
+        if (cand < 0 || usadas.has(cand)) return;
+        const taxa = taxaPreenchimento(cand);
+        if (taxa > melhorTaxa) {
+          melhorTaxa = taxa;
+          melhorIdx = cand;
+        }
+      });
+    }
+
+    if (melhorIdx !== -1) {
+      novosHeaders[idx] = '';
+      novosHeaders[melhorIdx] = h;
+      usadas.delete(idx);
+      usadas.add(melhorIdx);
+    }
+  });
+
+  return novosHeaders;
+}
+
+// Transforma a matriz bruta em array de objetos {coluna: valor}, já com
+// cabeçalho detectado, colunas deslocadas corrigidas e linhas de ruído
+// removidas.
+function matrizParaObjetos(matriz) {
+  matriz = (matriz || []).filter(l => Array.isArray(l));
+  if (!matriz.length) return [];
+
+  const idxCabecalho = encontrarLinhaCabecalho(matriz);
+  const linhaCabecalho = matriz[idxCabecalho] || [];
+  const cabecalhoNormalizado = linhaCabecalho.map(normalizarTexto).join('|');
+
+  let headers = linhaCabecalho.map(h => normalizarTexto(h));
+  headers = corrigirMapeamentoColunas(headers, matriz, idxCabecalho);
+
+  const objetos = [];
+  for (let i = idxCabecalho + 1; i < matriz.length; i++) {
+    const linha = matriz[i];
+    if (!linha || !linha.length) continue;
+    if (linhaEhRuido(linha, cabecalhoNormalizado)) continue;
+
+    const obj = {};
+    let preenchidos = 0;
+    headers.forEach((h, idx) => {
+      if (!h) return;
+      const valor = linha[idx] !== undefined ? linha[idx] : '';
+      obj[h] = valor;
+      if (String(valor).trim() !== '') preenchidos++;
+    });
+
+    // linha com menos de 2 campos preenchidos provavelmente é ruído
+    // (assinatura, rodapé etc.), não um registro de verdade
+    if (preenchidos >= 2) objetos.push(obj);
+  }
+  return objetos;
 }
 
 // -------------------- NORMALIZAÇÃO (versão agressiva) --------------------
@@ -237,26 +373,56 @@ function normalizarExtrato(dados) {
 function normalizarFornecedores(dados) {
   console.log('=== DEBUG FORNECEDORES ===');
   console.log('Linhas recebidas:', dados.length);
-  if (dados.length > 0) {
-    console.log('Colunas do Fornecedores:', Object.keys(dados[0]));
-  }
+  if (dados.length === 0) return [];
+
+  console.log('Colunas do Fornecedores:', Object.keys(dados[0]));
+
+  // Detecta o formato do relatório pelas colunas disponíveis:
+  // - "lista de pagamentos": tem coluna de data, um lançamento por linha
+  // - "balancete/consolidado": sem data, mas com débito/crédito por conta
+  //   (relatório de saldo por fornecedor exportado de sistemas contábeis)
+  const temData = encontrarChave(dados[0], ['data', 'date', 'dt', 'data pagamento', 'data pagto', 'data emissao']) !== undefined;
+  const temDebitoOuCredito = encontrarChave(dados[0], ['debito']) !== undefined || encontrarChave(dados[0], ['credito']) !== undefined;
+  const ehBalancete = !temData && temDebitoOuCredito;
+
+  console.log('Formato detectado:', ehBalancete ? 'balancete/consolidado (sem data, com débito/crédito)' : 'lista de pagamentos');
 
   const resultado = dados.map((linha, idx) => {
+    if (ehBalancete) {
+      const nomeBruto = encontrarValor(linha, [
+        'nome da conta', 'razao social', 'fornecedor', 'favorecido', 'beneficiario', 'nome fantasia', 'participante', 'cliente'
+      ]);
+      // usa o Débito da conta como valor (redução do saldo a pagar = pagamento);
+      // Crédito representa dívida nova sendo lançada, não um pagamento
+      const valor = parseValor(encontrarValor(linha, ['debito']));
+
+      return {
+        id: `forn-${idx}`,
+        origem: 'fornecedor',
+        data: '', // balancete não traz data por lançamento
+        documento: '', // balancete não traz número de documento
+        fornecedor: limparNomeFornecedor(nomeBruto),
+        valor: valor,
+        usado: false,
+        raw: linha
+      };
+    }
+
     const data = encontrarValor(linha, [
       'data', 'date', 'dt', 'data pagamento', 'data pagto', 'data emissão'
     ]);
-    
+
     const documento = encontrarValor(linha, [
       'documento', 'doc', 'nº documento', 'numero', 'nro', 'nf', 'nota', 'n doc', 'número nf'
     ]);
-    
+
     const fornecedor = encontrarValor(linha, [
-      'fornecedor', 'nome', 'razao social', 'razão social', 'participante', 
+      'fornecedor', 'nome', 'razao social', 'razão social', 'participante',
       'cliente', 'favorecido', 'beneficiário', 'nome fantasia'
     ]);
-    
+
     const valor = parseValor(encontrarValor(linha, [
-      'valor', 'value', 'amount', 'vlr', 'valor pago', 'valor (r$)', 
+      'valor', 'value', 'amount', 'vlr', 'valor pago', 'valor (r$)',
       'valor total', 'total', 'líquido'
     ]));
 
@@ -283,29 +449,70 @@ function normalizarFornecedores(dados) {
   return comValor;
 }
 
-function encontrarValor(obj, chaves) {
+function encontrarChave(obj, chaves) {
   const keys = Object.keys(obj);
-  
   for (const chave of chaves) {
     const encontrada = keys.find(k => {
-      const kLimpo = k.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const cLimpo = chave.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const kLimpo = normalizarTexto(k);
+      const cLimpo = normalizarTexto(chave);
       return kLimpo.includes(cLimpo);
     });
-    if (encontrada !== undefined) return obj[encontrada];
+    if (encontrada !== undefined) return encontrada;
   }
-  return '';
+  return undefined;
+}
+
+function encontrarValor(obj, chaves) {
+  const chave = encontrarChave(obj, chaves);
+  return chave !== undefined ? obj[chave] : '';
+}
+
+// Remove códigos de conta/CNPJ/CPF que vêm colados no início do nome em
+// relatórios contábeis (ex.: "02.127.038 MARIA ALMINDA..." ou
+// "11572-LANCHONETE POINT..."), mantendo só o nome de verdade.
+function limparNomeFornecedor(nome) {
+  if (!nome) return '';
+  const semCodigo = String(nome).replace(/^[\d][\d.\-/]*\s*-?\s*/, '').trim();
+  return semCodigo || String(nome).trim();
 }
 
 function parseValorComSinal(str) {
   if (str === null || str === undefined || str === '') return 0;
-  let limpo = String(str)
-    .replace(/R\$\s?/gi, '')
-    .replace(/\s/g, '')
-    .replace(/\./g, '')
-    .replace(',', '.');
-  const num = parseFloat(limpo);
-  return isNaN(num) ? 0 : num;
+  let s = String(str).replace(/R\$\s?/gi, '').trim();
+  if (!s) return 0;
+
+  // Notação contábil: valores entre parênteses são negativos, ex: "(1.234,56)"
+  let negativoParenteses = false;
+  if (/^\(.*\)$/.test(s)) {
+    negativoParenteses = true;
+    s = s.slice(1, -1);
+  }
+  s = s.replace(/\s/g, '');
+
+  // Detecta se o separador decimal é vírgula (padrão BR) ou ponto (padrão US),
+  // já que arquivos exportados por sistemas diferentes variam nisso mesmo
+  // dentro do Brasil (alguns bancos geram planilhas com formatação US).
+  const ultimaVirgula = s.lastIndexOf(',');
+  const ultimoPonto = s.lastIndexOf('.');
+
+  if (ultimaVirgula !== -1 && ultimoPonto !== -1) {
+    // os dois aparecem: o que vem por último é o separador decimal de verdade
+    if (ultimaVirgula > ultimoPonto) {
+      s = s.replace(/\./g, '').replace(',', '.'); // "1.234,56" -> "1234.56"
+    } else {
+      s = s.replace(/,/g, ''); // "1,234.56" -> "1234.56"
+    }
+  } else if (ultimaVirgula !== -1) {
+    const casas = s.length - ultimaVirgula - 1;
+    s = casas === 2 ? s.replace(',', '.') : s.replace(/,/g, '');
+  } else if (ultimoPonto !== -1) {
+    const casas = s.length - ultimoPonto - 1;
+    if (casas !== 2) s = s.replace(/\./g, ''); // ponto de milhar; 2 casas = decimal, mantém
+  }
+
+  const num = parseFloat(s);
+  if (isNaN(num)) return 0;
+  return negativoParenteses ? -Math.abs(num) : num;
 }
 
 function parseValor(str) {
@@ -683,7 +890,6 @@ function forcarConciliacao(id) {
 
   forcarItemOrigem = item;
 
-  // textContent evita qualquer risco de HTML vindo do arquivo do usuário
   $('#forcar-item-resumo').textContent = resumoItemPendente(item);
 
   const select = $('#forcar-select');
@@ -741,8 +947,6 @@ $('#btn-confirmar-forcar').addEventListener('click', () => {
 
 // -------------------- HISTÓRICO + EXPORTAR --------------------
 function despojarRaw(item) {
-  // remove o campo "raw" (linha original do arquivo) antes de persistir,
-  // para não estourar o limite do localStorage
   const { raw, ...resto } = item;
   return resto;
 }
@@ -761,7 +965,6 @@ $('#btn-salvar').addEventListener('click', () => {
     }
   };
   estado.historico.unshift(registro);
-  // mantém só os últimos 30 registros para não estourar o localStorage
   estado.historico = estado.historico.slice(0, 30);
 
   try {
