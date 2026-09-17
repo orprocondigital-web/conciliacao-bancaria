@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conciliação Bancária</title>
+
+  <!-- Biblioteca para ler Excel -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-content">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M8 7h12M8 12h12M8 17h12M4 7h.01M4 12h.01M4 17h.01"/>
+          </svg>
+        </div>
+        <h1>Conciliação Bancária</h1>
+      </div>
+      <nav class="nav">
+        <button id="btn-nova" class="btn btn-primary">Nova Conciliação</button>
+        <button id="btn-historico" class="btn btn-outline">Histórico</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- ====================== TELA 1: UPLOAD ====================== -->
+    <section id="tela-upload" class="tela ativa">
+      <div class="page-header">
+        <h2>Nova Conciliação</h2>
+        <p>Envie o extrato bancário e o relatório de fornecedores para iniciar a conciliação automática.</p>
+      </div>
+
+      <div class="upload-grid">
+        <!-- Extrato Bancário -->
+        <div class="upload-card" id="card-extrato">
+          <div class="upload-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="1.8">
+              <rect x="3" y="4" width="18" height="16" rx="2"/>
+              <path d="M3 10h18"/>
+              <path d="M8 15h2"/>
+              <path d="M14 15h2"/>
+            </svg>
+          </div>
+          <h3>Extrato Bancário</h3>
+          <p class="upload-desc">Arquivo CSV ou Excel do banco</p>
+          
+          <label class="file-label" for="file-extrato">
+            <span class="file-btn">Selecionar arquivo</span>
+            <input type="file" id="file-extrato" accept=".csv,.xlsx,.xls" hidden />
+          </label>
+          
+          <div id="info-extrato" class="file-info hidden">
+            <span class="file-name"></span>
+            <button class="btn-remove" title="Remover">✕</button>
+          </div>
+        </div>
+
+        <!-- Relatório de Fornecedores -->
+        <div class="upload-card" id="card-fornecedores">
+          <div class="upload-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="1.8">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+          </div>
+          <h3>Relatório de Fornecedores</h3>
+          <p class="upload-desc">Arquivo CSV ou Excel com pagamentos</p>
+          
+          <label class="file-label" for="file-fornecedores">
+            <span class="file-btn">Selecionar arquivo</span>
+            <input type="file" id="file-fornecedores" accept=".csv,.xlsx,.xls" hidden />
+          </label>
+          
+          <div id="info-fornecedores" class="file-info hidden">
+            <span class="file-name"></span>
+            <button class="btn-remove" title="Remover">✕</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions-center">
+        <button id="btn-conciliar" class="btn btn-primary btn-large" disabled>
+          Conciliar Automaticamente
+        </button>
+      </div>
+    </section>
+
+    <!-- ====================== TELA 2: RESULTADO ====================== -->
+    <section id="tela-resultado" class="tela">
+      <div class="page-header">
+        <h2>Resultado da Conciliação</h2>
+        <p>Revise os itens conciliados, pendentes e os lançamentos gerados.</p>
+      </div>
+
+      <!-- Cards de Resumo -->
+      <div class="resumo-grid">
+        <div class="card-resumo conciliados">
+          <div class="card-value" id="qtd-conciliados">0</div>
+          <div class="card-label">Conciliados</div>
+        </div>
+        <div class="card-resumo pendentes">
+          <div class="card-value" id="qtd-pendentes">0</div>
+          <div class="card-label">Pendentes</div>
+        </div>
+        <div class="card-resumo valor">
+          <div class="card-value" id="valor-total">R$ 0,00</div>
+          <div class="card-label">Valor Total</div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab ativa" data-tab="conciliados">Conciliados</button>
+        <button class="tab" data-tab="pendentes">Pendentes</button>
+        <button class="tab" data-tab="lancamentos">Lançamentos Contábeis</button>
+      </div>
+
+      <!-- Conteúdo das Tabs -->
+      <div class="tab-content">
+        <!-- Tabela Conciliados -->
+        <div id="tab-conciliados" class="tab-pane ativa">
+          <div class="table-wrapper">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th>Documento</th>
+                  <th>Fornecedor</th>
+                  <th>Valor</th>
+                  <th>Status</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-conciliados"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Tabela Pendentes -->
+        <div id="tab-pendentes" class="tab-pane">
+          <div class="table-wrapper">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Origem</th>
+                  <th>Data</th>
+                  <th>Documento</th>
+                  <th>Descrição / Fornecedor</th>
+                  <th>Valor</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-pendentes"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Tabela Lançamentos -->
+        <div id="tab-lancamentos" class="tab-pane">
+          <div class="table-wrapper">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th>Débito</th>
+                  <th>Participante</th>
+                  <th>Crédito</th>
+                  <th>Valor</th>
+                  <th>Origem</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-lancamentos"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions-bar">
+        <button id="btn-voltar" class="btn btn-outline">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="margin-right:6px">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+          Voltar para Início
+        </button>
+        <div class="actions-right">
+          <button id="btn-exportar" class="btn btn-outline">Exportar Lançamentos</button>
+          <button id="btn-salvar" class="btn btn-primary">Salvar Histórico</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====================== TELA 3: HISTÓRICO ====================== -->
+    <section id="tela-historico" class="tela">
+      <div class="page-header">
+        <h2>Histórico de Conciliações</h2>
+        <p>Consulte as conciliações salvas anteriormente.</p>
+      </div>
+
+      <div id="lista-historico" class="historico-lista">
+        <div class="empty-state">
+          <p>Nenhuma conciliação salva ainda.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ====================== MODAL DE CORREÇÃO ====================== -->
+  <div id="modal-correcao" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Corrigir Conciliação</h3>
+        <button id="btn-fechar-modal" class="btn-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Documento</label>
+          <input type="text" id="modal-documento" class="input" />
+        </div>
+        <div class="form-group">
+          <label>Fornecedor / Descrição</label>
+          <input type="text" id="modal-fornecedor" class="input" />
+        </div>
+        <div class="form-group">
+          <label>Valor</label>
+          <input type="text" id="modal-valor" class="input" />
+        </div>
+        <div class="form-group">
+          <label>Data</label>
+          <input type="date" id="modal-data" class="input" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancelar-modal" class="btn btn-outline">Cancelar</button>
+        <button id="btn-salvar-correcao" class="btn btn-primary">Salvar Correção</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
